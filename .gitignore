@@ -1,0 +1,25 @@
+# Build outputs
+Debug/
+Release/
+
+# Eclipse/CubeIDE per-user state
+.metadata/
+*.launch
+RemoteSystemsTempFiles/
+
+# Tool artifacts
+*.bak
+*.orig
+*.swp
+*~
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Local IDE/editor settings (project-portable Eclipse settings under .settings/ are kept)
+.vscode/
+.idea/
+
+# Claude session metadata
+.claude/
