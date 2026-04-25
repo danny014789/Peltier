@@ -121,7 +121,8 @@ static int append_f3(char *buf, int pos, int cap, float v)
     if (frac >= 1000) { whole += 1; frac -= 1000; }
     pos = append_uint(buf, pos, cap, (uint32_t)whole);
     if (pos < cap - 1) buf[pos++] = '.';
-    if (pos < cap - 1) buf[pos++] = (char)('0' + (frac / 100)); frac %= 100;
+    if (pos < cap - 1) buf[pos++] = (char)('0' + (frac / 100));
+    frac %= 100;
     if (pos < cap - 1) buf[pos++] = (char)('0' + (frac / 10));
     if (pos < cap - 1) buf[pos++] = (char)('0' + (frac % 10));
     return pos;
