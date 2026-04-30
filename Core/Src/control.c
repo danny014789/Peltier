@@ -85,8 +85,8 @@ void Control_Tick50Hz(void)
 {
     s_state.tick_count++;
 
-    /* Status LED heartbeat at 1 Hz (PC13 active-low) */
-    if ((s_state.tick_count % CTRL_LOOP_HZ) == 0) {
+    /* Status LED heartbeat at 2 Hz (PC13 active-low) */
+    if ((s_state.tick_count % (CTRL_LOOP_HZ / 2)) == 0) {
         HAL_GPIO_TogglePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin);
     }
 
