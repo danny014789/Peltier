@@ -122,16 +122,30 @@ int main(void)
   MX_TIM3_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-  Control_Init();
-  CLI_Init();
+  /* === USB ENUMERATION ISOLATION TEST ===
+   * Temporarily disabling Control_Init() (TIM3 50 Hz IRQ + ADC polling) and
+   * CLI_Init() (USB CDC banner print) to test whether the PID code is
+   * interfering with USB enumeration.  The MCU still inits USB and blinks
+   * the LED in the main loop so we know firmware is alive.
+   *
+   * If USB enumerates with this build, the bug is somewhere in our 50 Hz
+   * loop or its setup.  If it STILL doesn't enumerate, the problem is at
+   * a lower level (clock precision, peripheral state, board-specific).
+   *
+   * Restore the two lines below once we've used this datapoint.
+   */
+  /* Control_Init(); */
+  /* CLI_Init();     */
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    CLI_Process();
-    CLI_StreamTelemetry();
+    HAL_GPIO_TogglePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin);
+    HAL_Delay(250);   /* 2 Hz blink in main loop, no IRQ used */
+    /* CLI_Process();          */
+    /* CLI_StreamTelemetry();  */
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
