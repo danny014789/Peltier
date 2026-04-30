@@ -90,7 +90,24 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* USB re-enumeration trick:
+   * Many "Blue Pill" boards ship with a wrong-value D+ pull-up (R10 = 10k
+   * instead of 1.5k), so the host doesn't reliably detect insertion.
+   * Driving PA12 (D+) low for ~50 ms then releasing forces the host to
+   * see a fresh attachment and re-enumerate.  The USB peripheral takes
+   * over PA12 again once MX_USB_DEVICE_Init() runs.
+   */
+  {
+    GPIO_InitTypeDef gpio = {0};
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    gpio.Pin   = GPIO_PIN_12;
+    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOA, &gpio);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+    HAL_Delay(50);
+  }
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
