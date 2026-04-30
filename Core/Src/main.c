@@ -25,6 +25,7 @@
 /* USER CODE BEGIN Includes */
 #include "control.h"
 #include "cli.h"
+#include "usbd_cdc_if.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -107,6 +108,10 @@ int main(void)
     HAL_GPIO_Init(GPIOA, &gpio);
     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
     HAL_Delay(50);
+    /* Release PA12 back to floating input so the USB peripheral can drive it. */
+    gpio.Mode = GPIO_MODE_INPUT;
+    gpio.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &gpio);
   }
   /* USER CODE END SysInit */
 
