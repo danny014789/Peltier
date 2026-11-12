@@ -1,25 +1,21 @@
-# Build outputs
-Debug/
-Release/
-
-# Eclipse/CubeIDE per-user state
+# IDE workspace metadata and logs
 .metadata/
+build.log
+
+# Firmware build outputs (the Release makefiles ARE tracked: there is no .ioc to regenerate them)
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.hex
+*.bin
+*.map
+QB55_BLE_UART.list
 *.launch
-RemoteSystemsTempFiles/
 
-# Tool artifacts
-*.bak
-*.orig
-*.swp
-*~
-
-# OS junk
-Thumbs.db
-.DS_Store
-
-# Local IDE/editor settings (project-portable Eclipse settings under .settings/ are kept)
-.vscode/
-.idea/
-
-# Claude session metadata
-.claude/
+# Windows app build outputs
+QB55_BLE_Monitor/dist/
+QB55_BLE_Monitor/build/
+__pycache__/
+*.spec
