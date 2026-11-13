@@ -66,10 +66,16 @@ There is **no `.ioc` file**, so CubeMX cannot be used on this project. Edit the 
 | **NTC** | **PC3** (ADC1 channel 4) | **CN7 pin 36** (Arduino CN8 pin A4) | Analog input | Midpoint of the thermistor divider. |
 | 3V3 | - | the pin labelled 3V3 on the Nucleo power header | Supply | Divider top. **Same rail as the ADC reference.** |
 | GND | - | any GND pin | Ground | Common ground for filter, NTC, DRV595 signal. |
+| **SDZ** (DRV595 pin 2) | **PA3** | not looked up | Digital output | **LOW = DRV595 outputs high-impedance (shutdown), HIGH = enabled.** Low at boot. |
+| **Hi-Z** (DRV595 pin 12) | **PA2** | not looked up | Digital output | **HIGH = outputs high-impedance (fast disable), LOW = enabled.** High at boot. |
+| **FAULTZ** (DRV595 pin 3) | **PC6** | not looked up | Digital input | Open-drain from the DRV595: **LOW = fault**. Internal pull-up on in the MCU. |
 
 Header positions for PA0, PA1 and PC3 come from ST's own example readmes for this board **[source]**. I did
-not find ST's numbers for the 3V3 and GND header pins in this project, so use the labelled pins and check
-them against the Nucleo user manual (UM2435) before wiring.
+not find ST's numbers for the 3V3 and GND header pins, nor for PA2, PA3 and PC6, so use the labelled pins and
+check them against the Nucleo user manual (UM2435) before wiring.
+
+The three DRV595 pins were given by you as the pins your PCB uses. After a reset I read the registers over
+SWD **[tested]**: PA2 high, PA3 low (outputs disabled), PC6 an input with its pull-up on, reading high.
 
 ### 3.2 Fixed on the board (for reference)
 
@@ -88,8 +94,9 @@ them against the Nucleo user manual (UM2435) before wiring.
 
 ### 3.3 Pins to avoid reusing
 
-PA0, PA1 and PC3 are taken by this firmware. PA13, PA14 and PB3 belong to programming. PB6/PB7 belong to the
-ST-Link serial port.
+PA0, PA1, PA2, PA3, PC3 and PC6 are taken by this firmware. PA13, PA14 and PB3 belong to programming.
+PB6/PB7 belong to the ST-Link serial port. (PA2/PA3 are the pins ST's code uses for LPUART1, but this
+firmware never starts LPUART1, so they are free.)
 
 ---
 
@@ -111,13 +118,23 @@ ST-Link serial port.
 | Setpoint range | 0 to 30 C |
 | Over-temperature cutoff | 85 C measured |
 | Sensor fault | Reading within 100 counts of either ADC end, or outside -40 to 150 C, for 5 ticks (0.5 s) |
-| Program size | about 63 KB of the 1 MB flash |
+| DRV595 enable | SDZ low + Hi-Z high (disabled) from boot; `pid on` / `drv on` enable, with a 12 ms wait after SDZ goes high |
+| DRV595 fault reaction | FAULTZ low for 2 control ticks (200 ms) stops the PID and disables the driver |
+| Program size | about 65 KB of the 1 MB flash |
 
 ---
 
 ## 5. Wiring guide (hardware not yet built, so none of this is tested)
 
 ### 5.1 IN+ and IN- filter, one per pin
+
+> **UNDER REVISION - do not build this filter as written.** It assumed the DRV595 input is a high-resistance
+> load to ground. The datasheet (SLOS808A) says the input is fully differential, **30 kOhm at your 26 dB
+> setting (+-20 %)**, with both IN+ and IN- **biased at 3 V** and an input common-mode range of
+> **0.5 to 4.5 V**. With both pins at 0 V the amplifier is outside that range, and a resistor on IN+ alone
+> is pulled toward 3 V by the bias network. The proposed fix is the same filter on **both** inputs (about
+> 22 kOhm, 0.1 %, plus 1 uF ceramic each). I have not built or tested it; this section will be rewritten once
+> the PCB wiring around IN+ and IN- is confirmed. Until then keep the Peltier disconnected.
 
 The recommended single-stage filter for the parts you have is a **100 kOhm resistor and a 104 ceramic
 capacitor (100 nF)**, with the firmware set to 10-bit PWM (already the case).
@@ -186,6 +203,34 @@ output if the DRV595 supply allows it. Check before connecting:
 
 ---
 
+### 5.4 DRV595 control pins (SDZ, Hi-Z, FAULTZ)
+
+Facts are from the DRV595 datasheet (SLOS808A). All three are TTL-level (high above 2 V, low below 0.8 V), so
+the Nucleo's 3.3 V logic is fine.
+
+| Pin | Add on the PCB | Why |
+|---|---|---|
+| SDZ (PA3) | ~100 kOhm **pull-down** to GND | The datasheet says not to leave it unconnected. A pull-down keeps the amplifier in shutdown while the MCU is still resetting and its pins float. |
+| Hi-Z (PA2) | ~100 kOhm **pull-up to 3V3** | It is active high, so a pull-up keeps the outputs disabled while the MCU pin floats. |
+| FAULTZ (PC6) | ~100 kOhm **pull-up to 3V3** (the DRV595 EVM uses 100 kOhm) | FAULTZ is open drain. **Pull up to the Nucleo's 3V3, never to PVCC**: PVCC can be 26 V and would damage the MCU pin. The MCU's own pull-up is only a backup. |
+
+What the firmware does **[tested in the simulator, not with real DRV595 hardware]**:
+
+* **Boot:** Hi-Z high, SDZ low. The outputs are disabled until you enable them.
+* **`pid on`:** IN+ is set to 0 V, SDZ goes high, the firmware waits 12 ms (the datasheet turn-on time is
+  10 ms), then Hi-Z goes low. If FAULTZ is already low it refuses to start and leaves the driver disabled.
+* **`pid off`, any fault, or `sim on`:** Hi-Z goes high first (fast disable), then SDZ goes low.
+* **FAULTZ low while enabled** for 2 control ticks (200 ms): the PID stops, the driver is disabled and the
+  board sends `FAULT: DRV595 FAULTZ low (short/over-current/over-temp/PVCC). Outputs disabled, PID stopped`.
+  The DRV595 reports short or over-current and over-temperature (about 150 C die) as **latched** faults and
+  PVCC under/over-voltage (below 4.5 V or above 27 V) as self-clearing. Taking SDZ low, which the firmware
+  does, clears a latched fault. The reason is not distinguishable from the single FAULTZ line.
+* **Not used:** the datasheet's trick of wiring FAULTZ directly to SDZ for automatic recovery. Here the
+  MCU should see the fault and decide.
+* The other DRV595 inputs (MODSEL, FS0 to FS2, SYNC, GAIN/SLV) are board-level straps, not driven by the MCU.
+
+---
+
 ## 6. First start
 
 1. Plug the Nucleo into the PC by USB (the ST-Link port).
@@ -196,7 +241,7 @@ output if the DRV595 supply allows it. Check before connecting:
 4. Click **Connect**.
 
 State after every reset **[tested]**: PID off, IN+ and IN- at 0 V, mode cool, no setpoint, Kp 0.10,
-Ki 0.005, Kd 0, ceiling 1.000 V, log off, simulator off, LD3 off.
+Ki 0.005, Kd 0, ceiling 1.000 V, log off, simulator off, LD3 off, DRV595 disabled (SDZ low, Hi-Z high).
 
 ---
 
@@ -257,12 +302,14 @@ shown below as sent by the board.
 |---|---|
 | `set 15` or `temp 15` | `SP = 15.0 C`. Range 0 to 30. A trailing `c` is accepted (`set 15c`). |
 | `temp` or `set` alone | `T = 24.87 C`, the measured temperature. |
-| `pid on` | Starts control: `PID on: cool, T=25.0C -> SP=15.0C, output max 1.000 V`. |
-| `pid off` | `PID off, IN+ = 0 V`. Output goes to 0 V and the PID stops. |
+| `pid on` | Enables the DRV595 and starts control: `PID on: cool, T=25.0C -> SP=15.0C, output max 1.000 V, DRV595 enabled`. |
+| `pid off` | `PID off, IN+ = 0 V, DRV595 disabled`. Output goes to 0 V, the driver is disabled and the PID stops. |
+| `drv` | Report the driver: `DRV595: disabled  SDZ=0 Hi-Z=1 FAULTZ=ok` (the real pin levels). |
+| `drv on` / `drv off` | Enable or disable the DRV595 by hand, without the PID. `drv on` is refused if IN+ is above 1.000 V, or if FAULTZ is low. `drv off` also stops a running PID. |
 | `pid mode cool` / `pid mode heat` | Direction of the drive. Only allowed while the PID is off. |
 | `pid kp 0.2`, `pid ki 0.01`, `pid kd 0.5` | Set a gain. With no value, report it. Ranges: kp and ki 0 to 100, kd 0 to 1000. |
 | `pid max 0.8` | Lower the output ceiling (0 to 1.0 V). A trailing `v` is accepted. |
-| `status` or `pid` | Two lines: temperature, setpoint, output, state, mode, then gains, ceiling, source, ADC count, thermistor resistance. |
+| `status` or `pid` | Three lines: temperature, setpoint, output, state, mode; then gains, ceiling, source, ADC count, thermistor resistance; then the DRV595 line (as `drv`). |
 | `log on` / `log off` | While on, one line a second: `T=24.87 SP=15.00 OUT=0.412V RUN`. Default off. |
 | `help` | One-line command list. |
 
@@ -285,8 +332,11 @@ Messages the board sends on its own **[tested]**:
 |---|---|
 | `FAULT: no valid temperature (sensor open/short?). PID stopped, IN+ = 0 V` | Sensor open, shorted or implausible for 0.5 s. |
 | `FAULT: over-temperature cutoff. PID stopped, IN+ = 0 V` | Measured above 85 C. |
+| `FAULT: DRV595 FAULTZ low (short/over-current/over-temp/PVCC). Outputs disabled, PID stopped` | The DRV595 pulled FAULTZ low for 200 ms. `status` then shows `PID=FAULT-DRV595`. |
 
-After either fault the output is 0 V and stays off until you send `pid on` again.
+After any of these faults the output is 0 V and the DRV595 is disabled. It stays off until you send
+`pid on` again. If `pid on` answers `DRV595 reports a fault (FAULTZ low)`, the fault is still present: check
+PVCC, the Peltier wiring (a short) and the DRV595 temperature.
 
 ### 8.2 Direct outputs
 
@@ -317,6 +367,11 @@ After either fault the output is 0 V and stays off until you send `pid on` again
 | `sim off` | Back to the real thermistor (also stops the PID if it was running). |
 | `sim open` / `sim short` / `sim ok` | While on: pretend the thermistor is broken, or repaired. |
 | `sim temp 140` | While on: jump the simulated temperature (to test the cutoff). |
+| `sim drvfault` / `sim drvok` | While on: pretend FAULTZ is low, or high again (to test the DRV595 fault reaction). |
+
+**The simulator never enables the real DRV595 pins.** In simulator mode `pid on` and `drv on` only change the
+logical state: SDZ stays low and Hi-Z stays high, which the `status` line shows as `(sim: pins held
+disabled)`. Switching the simulator on or off first disables the driver.
 
 The simulated plant is a simple first-order model (ambient 25 C, 30 C per volt, 10 s time constant) and is
 **not your hardware**. It feeds a raw ADC count through the same conversion and fault checks as the real
@@ -429,6 +484,9 @@ tried on your hardware:
 * One Bluetooth client at a time in practice.
 * The direct `IN+` command is not limited to 1 V (only the PID output is).
 * I could not check what ST's debug traces print on the ST-Link serial port.
+* The real enable sequence (SDZ high, 12 ms, Hi-Z low) and a real FAULTZ fault have **not** been tested on
+  hardware; only the pin states at boot and the simulator paths were. Check SDZ and Hi-Z with a multimeter
+  before connecting the DRV595 supply.
 
 ---
 
@@ -493,5 +551,6 @@ pid kp|ki|kd <x>  gains                             pid max <V>   output ceiling
 status            full summary                      log on|off    1 line per second
 IN+ <V>  IN- <V>  set an output (0-3.3 V)           IN+  IN-      read an output
 led on|off        red LED LD3                       help
-sim on|off        test without hardware             sim open|short|ok|temp <C>
+drv [on|off]      DRV595 enable pins / state        sim on|off    test without hardware
+sim open|short|ok|temp <C>|drvfault|drvok            (the simulator never enables the real DRV595 pins)
 ```

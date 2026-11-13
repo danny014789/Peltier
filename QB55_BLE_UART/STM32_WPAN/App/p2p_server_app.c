@@ -512,7 +512,7 @@ static void QB55_Uart_Command(const uint8_t *line, uint8_t len)
   }
   else
   {
-    char reply[160];
+    char reply[256];
 
     reply[0] = '\0';
     if (QB55_In_Command(cmd, reply, sizeof(reply)) ||        /* "IN+ 2V", "IN- 1.5V", "IN+" */

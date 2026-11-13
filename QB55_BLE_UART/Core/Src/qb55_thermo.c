@@ -143,7 +143,8 @@ typedef enum
   ST_OFF = 0,
   ST_RUN,
   ST_FAULT_SENSOR,
-  ST_FAULT_OVERTEMP
+  ST_FAULT_OVERTEMP,
+  ST_FAULT_DRIVER
 } State_t;
 
 #define TEMP_FILTER_ALPHA  0.3f    /* exponential smoothing of the reading, per 100 ms tick */
@@ -173,12 +174,75 @@ static struct
   uint8_t  log_div;
   uint8_t  sim_on;
   uint8_t  sim_fault;       /* 0 = none, 1 = thermistor open, 2 = shorted */
+  uint8_t  sim_drv_fault;   /* simulator: pretend FAULTZ is low */
   float    sim_t;
   uint32_t noise;
 } S;
 
 static uint8_t tick_id;
 static uint8_t tick_running;
+
+/* ---- DRV595 enable / fault pins ------------------------------------------------------------- */
+
+static uint8_t drv_on;          /* the controller wants the DRV595 enabled */
+static uint8_t fault_count;     /* consecutive control ticks with FAULTZ low */
+
+void QB55_Drv_Init(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /* Disabled state first (Hi-Z high, SDZ low), then make the pins outputs: no glitch to "enabled". */
+  HAL_GPIO_WritePin(QB55_DRV_HIZ_PORT, QB55_DRV_HIZ_PIN, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(QB55_DRV_SDZ_PORT, QB55_DRV_SDZ_PIN, GPIO_PIN_RESET);
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  gpio.Pin = QB55_DRV_HIZ_PIN;
+  HAL_GPIO_Init(QB55_DRV_HIZ_PORT, &gpio);
+  gpio.Pin = QB55_DRV_SDZ_PIN;
+  HAL_GPIO_Init(QB55_DRV_SDZ_PORT, &gpio);
+
+  /* FAULTZ is open drain: the board needs a pull-up to 3V3; ours is a backup so it never floats. */
+  gpio.Mode = GPIO_MODE_INPUT;
+  gpio.Pull = GPIO_PULLUP;
+  gpio.Pin = QB55_DRV_FAULTZ_PIN;
+  HAL_GPIO_Init(QB55_DRV_FAULTZ_PORT, &gpio);
+}
+
+static void DrvPins(uint8_t enable)
+{
+  if (enable)
+  {
+    HAL_GPIO_WritePin(QB55_DRV_SDZ_PORT, QB55_DRV_SDZ_PIN, GPIO_PIN_SET);    /* leave shutdown */
+    HAL_Delay(QB55_DRV_ON_DELAY_MS);                                         /* turn-on time */
+    HAL_GPIO_WritePin(QB55_DRV_HIZ_PORT, QB55_DRV_HIZ_PIN, GPIO_PIN_RESET);  /* release the outputs */
+  }
+  else
+  {
+    HAL_GPIO_WritePin(QB55_DRV_HIZ_PORT, QB55_DRV_HIZ_PIN, GPIO_PIN_SET);    /* fast disable first */
+    HAL_GPIO_WritePin(QB55_DRV_SDZ_PORT, QB55_DRV_SDZ_PIN, GPIO_PIN_RESET);  /* then shutdown (also clears a latched fault) */
+  }
+}
+
+/* The simulator never touches the real driver: it only tracks the state, the pins stay disabled. */
+static void DrvSet(uint8_t on)
+{
+  drv_on = on;
+  fault_count = 0U;
+  DrvPins((uint8_t)(on && !S.sim_on));
+}
+
+static uint8_t FaultzLow(void)
+{
+  if (S.sim_on)
+  {
+    return S.sim_drv_fault;
+  }
+  return (HAL_GPIO_ReadPin(QB55_DRV_FAULTZ_PORT, QB55_DRV_FAULTZ_PIN) == GPIO_PIN_RESET) ? 1U : 0U;
+}
 
 /* ---- reading a temperature ------------------------------------------------------------------ */
 
@@ -266,7 +330,7 @@ static void MeasureNow(void)
 
 static void UpdateTick(void)
 {
-  const uint8_t need = (S.state == ST_RUN) || S.sim_on || S.log_on;
+  const uint8_t need = (S.state == ST_RUN) || S.sim_on || S.log_on || drv_on;
 
   if (need && !tick_running)
   {
@@ -282,6 +346,7 @@ static void UpdateTick(void)
 
 static void OutputOff(State_t new_state)
 {
+  DrvSet(0U);                                   /* outputs high-impedance before anything else */
   S.state = new_state;
   S.out_v = 0.0f;
   S.integ = 0.0f;
@@ -317,6 +382,20 @@ static void ControlStep(void)
   if (dt < 0.01f || dt > 1.0f)
   {
     dt = (float)QB55_PID_PERIOD_MS / 1000.0f;
+  }
+
+  if (drv_on)             /* DRV595 fault line: low = short / over-current / over-temp / PVCC */
+  {
+    if (!FaultzLow())
+    {
+      fault_count = 0U;
+    }
+    else if (++fault_count >= QB55_DRV_FAULT_TICKS)
+    {
+      OutputOff(ST_FAULT_DRIVER);
+      QB55_Uart_Print("FAULT: DRV595 FAULTZ low (short/over-current/over-temp/PVCC). Outputs disabled, PID stopped");
+      return;
+    }
   }
 
   if (S.sim_on)           /* advance the simulated plant with the output of the previous step */
@@ -421,6 +500,8 @@ static void TickCallback(void)        /* timer ISR: just hand over to the sequen
 void QB55_Thermo_Init(void)
 {
   memset(&S, 0, sizeof(S));
+  drv_on = 0U;                       /* the pins were put in the disabled state by QB55_Drv_Init() */
+  fault_count = 0U;
   S.heat = QB55_PID_DEFAULT_HEAT;
   S.setpoint = NAN;
   S.kp = 0.10f;
@@ -487,10 +568,22 @@ static int ParseNumber(const char *s, char unit, float *out)
   return 1;
 }
 
+/* One line: what the controller wants and what the three DRV595 pins really read. */
+static void DrvLine(char *out, size_t n)
+{
+  snprintf(out, n, "DRV595: %s  SDZ=%d Hi-Z=%d FAULTZ=%s%s\r\n",
+           drv_on ? "enabled" : "disabled",
+           HAL_GPIO_ReadPin(QB55_DRV_SDZ_PORT, QB55_DRV_SDZ_PIN) == GPIO_PIN_SET ? 1 : 0,
+           HAL_GPIO_ReadPin(QB55_DRV_HIZ_PORT, QB55_DRV_HIZ_PIN) == GPIO_PIN_SET ? 1 : 0,
+           HAL_GPIO_ReadPin(QB55_DRV_FAULTZ_PORT, QB55_DRV_FAULTZ_PIN) == GPIO_PIN_SET ? "ok" : "LOW",
+           S.sim_on ? " (sim: pins held disabled)" : "");
+}
+
 static void ReplyStatus(char *reply, size_t n)
 {
   char t[16];
   char sp[16];
+  char drv[96];
   const char *st;
 
   MeasureNow();
@@ -515,15 +608,17 @@ static void ReplyStatus(char *reply, size_t n)
     case ST_RUN:             st = "RUN"; break;
     case ST_FAULT_SENSOR:    st = "FAULT-SENSOR"; break;
     case ST_FAULT_OVERTEMP:  st = "FAULT-OVERTEMP"; break;
+    case ST_FAULT_DRIVER:    st = "FAULT-DRV595"; break;
     default:                 st = "off"; break;
   }
+  DrvLine(drv, sizeof(drv));
   snprintf(reply, n,
            "T=%s SP=%s OUT=%.3fV PID=%s %s\r\n"
-           "kp=%.3f ki=%.4f kd=%.3f max=%.3fV src=%s raw=%u R=%.0f\r\n",
+           "kp=%.3f ki=%.4f kd=%.3f max=%.3fV src=%s raw=%u R=%.0f\r\n%s",
            t, sp, (double)S.out_v, st, S.heat ? "heat" : "cool",
            (double)S.kp, (double)S.ki, (double)S.kd, (double)S.out_max_v,
            S.sim_on ? "sim" : (adc_ready ? "adc" : "adc-FAILED"),
-           (unsigned)S.raw, (double)S.r_ntc);
+           (unsigned)S.raw, (double)S.r_ntc, drv);
 }
 
 static void ReplyError(char *reply, size_t n, const char *msg)
@@ -554,23 +649,35 @@ static void HandlePid(const char *arg, char *reply, size_t n)
     }
     else
     {
-      S.temp_f = t;
-      S.temp_valid = 1U;
-      S.integ = 0.0f;
-      S.pv_prev = S.heat ? t : -t;
-      S.bad_count = 0U;
-      S.last_ms = HAL_GetTick();
-      S.state = ST_RUN;
-      QB55_In_SetLocked(QB55_IN_PLUS, 1U);
-      UpdateTick();
-      snprintf(reply, n, "PID on: %s, T=%.1fC -> SP=%.1fC, output max %.3f V\r\n",
-               S.heat ? "heat" : "cool", (double)t, (double)S.setpoint, (double)S.out_max_v);
+      (void)QB55_In_SetMilliVolts(QB55_IN_PLUS, 0U);    /* the DRV595 sees 0 V when it is enabled */
+      DrvSet(1U);
+      if (FaultzLow())
+      {
+        DrvSet(0U);
+        ReplyError(reply, n, "DRV595 reports a fault (FAULTZ low); outputs left disabled. "
+                             "Check PVCC, the load and the wiring");
+      }
+      else
+      {
+        S.temp_f = t;
+        S.temp_valid = 1U;
+        S.integ = 0.0f;
+        S.pv_prev = S.heat ? t : -t;
+        S.bad_count = 0U;
+        S.last_ms = HAL_GetTick();
+        S.state = ST_RUN;
+        QB55_In_SetLocked(QB55_IN_PLUS, 1U);
+        UpdateTick();
+        snprintf(reply, n, "PID on: %s, T=%.1fC -> SP=%.1fC, output max %.3f V, DRV595 %s\r\n",
+                 S.heat ? "heat" : "cool", (double)t, (double)S.setpoint, (double)S.out_max_v,
+                 S.sim_on ? "pins held disabled (sim)" : "enabled");
+      }
     }
   }
   else if (strcmp(arg, "off") == 0)
   {
     OutputOff(ST_OFF);
-    snprintf(reply, n, "PID off, IN+ = 0 V\r\n");
+    snprintf(reply, n, "PID off, IN+ = 0 V, DRV595 disabled\r\n");
   }
   else if (Starts(arg, "mode", &a))
   {
@@ -621,6 +728,51 @@ static void HandlePid(const char *arg, char *reply, size_t n)
   }
 }
 
+/* Manual control of the DRV595 enable pins, for testing the board without the PID. */
+static void HandleDrv(const char *arg, char *reply, size_t n)
+{
+  if (*arg == '\0')
+  {
+    DrvLine(reply, n);
+  }
+  else if (strcmp(arg, "on") == 0)
+  {
+    if (QB55_In_GetMilliVolts(QB55_IN_PLUS) > QB55_PID_OUT_MAX_MV)
+    {
+      ReplyError(reply, n, "IN+ is above 1.000 V; lower it first (IN+ 0V) so the DRV595 does not start hard");
+      return;
+    }
+    DrvSet(1U);
+    if (FaultzLow())
+    {
+      DrvSet(0U);
+      ReplyError(reply, n, "DRV595 reports a fault (FAULTZ low); outputs left disabled");
+    }
+    else
+    {
+      snprintf(reply, n, "DRV595 enabled%s: the outputs are live\r\n",
+               S.sim_on ? " (simulator: pins held disabled)" : "");
+    }
+  }
+  else if (strcmp(arg, "off") == 0)
+  {
+    if (S.state == ST_RUN)
+    {
+      OutputOff(ST_OFF);                         /* the PID cannot run without the driver */
+    }
+    else
+    {
+      DrvSet(0U);
+      UpdateTick();
+    }
+    snprintf(reply, n, "DRV595 disabled (outputs high-impedance)\r\n");
+  }
+  else
+  {
+    ReplyError(reply, n, "drv | drv on | drv off");
+  }
+}
+
 int QB55_Thermo_Command(const char *cmd, char *reply, size_t reply_len)
 {
   const char *arg;
@@ -634,8 +786,12 @@ int QB55_Thermo_Command(const char *cmd, char *reply, size_t reply_len)
   else if (strcmp(cmd, "help") == 0)
   {
     snprintf(reply, reply_len,
-             "set <C> | temp | pid on|off|mode|kp|ki|kd|max | status | log on|off | "
-             "led on|off | IN+/IN- <V>\r\n");
+             "set <C> | temp | pid on|off|mode|kp|ki|kd|max | drv [on|off] | status | "
+             "log on|off | led on|off | IN+/IN- <V>\r\n");
+  }
+  else if (Starts(cmd, "drv", &arg))
+  {
+    HandleDrv(arg, reply, reply_len);
   }
   else if (Starts(cmd, "set", &arg) || Starts(cmd, "temp", &arg))
   {
@@ -684,8 +840,13 @@ int QB55_Thermo_Command(const char *cmd, char *reply, size_t reply_len)
   {
     if (strcmp(arg, "on") == 0)
     {
+      if (S.state == ST_RUN || drv_on)
+      {
+        OutputOff(ST_OFF);                           /* disable the real DRV595 before switching */
+      }
       S.sim_on = 1U;
       S.sim_fault = 0U;
+      S.sim_drv_fault = 0U;
       S.sim_t = SIM_AMBIENT_C;
       S.temp_valid = 0U;
       UpdateTick();
@@ -696,10 +857,15 @@ int QB55_Thermo_Command(const char *cmd, char *reply, size_t reply_len)
     {
       S.sim_on = 0U;
       S.sim_fault = 0U;
+      S.sim_drv_fault = 0U;
       S.temp_valid = 0U;
       if (S.state == ST_RUN)
       {
         OutputOff(ST_OFF);
+      }
+      else
+      {
+        DrvSet(0U);                                  /* a simulated "drv on" must not carry over */
       }
       UpdateTick();
       snprintf(reply, reply_len, "simulator off: reading the real thermistor\r\n");
@@ -710,6 +876,11 @@ int QB55_Thermo_Command(const char *cmd, char *reply, size_t reply_len)
       S.sim_fault = (arg[0] == 'o' && arg[1] == 'p') ? 1U : (arg[0] == 's') ? 2U : 0U;
       snprintf(reply, reply_len, "simulated thermistor: %s\r\n", arg);
     }
+    else if (S.sim_on && (strcmp(arg, "drvfault") == 0 || strcmp(arg, "drvok") == 0))
+    {
+      S.sim_drv_fault = (arg[3] == 'f') ? 1U : 0U;
+      snprintf(reply, reply_len, "simulated FAULTZ: %s\r\n", S.sim_drv_fault ? "LOW (fault)" : "high (ok)");
+    }
     else if (S.sim_on && Starts(arg, "temp", &a) && ParseNumber(a, 'c', &v) &&
              v > -39.0f && v < 149.0f)
     {
@@ -718,7 +889,7 @@ int QB55_Thermo_Command(const char *cmd, char *reply, size_t reply_len)
     }
     else
     {
-      ReplyError(reply, reply_len, "sim on | sim off | (while on) sim open|short|ok|temp <C>");
+      ReplyError(reply, reply_len, "sim on | sim off | (while on) sim open|short|ok|temp <C>|drvfault|drvok");
     }
   }
   else

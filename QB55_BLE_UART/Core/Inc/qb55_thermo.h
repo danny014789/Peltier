@@ -46,6 +46,24 @@ extern "C" {
    cool below room temperature. "pid mode heat|cool" changes it at run time (while the PID is off). */
 #define QB55_PID_DEFAULT_HEAT 0
 
+/* ---- DRV595 control pins (TI SLOS808A) ----------------------------------------------------- */
+/* SDZ   (DRV595 pin 2):  LOW = outputs high-impedance (shutdown), HIGH = enabled.
+   Hi-Z  (DRV595 pin 12): HIGH = outputs high-impedance (fast disable), LOW = enabled.
+   FAULTZ(DRV595 pin 3):  open drain, LOW = fault (short, over-current, over-temperature, PVCC out
+                          of range). Needs a pull-up to 3V3 (the MCU pin also has its own).
+   The firmware keeps the outputs disabled (Hi-Z high, SDZ low) from boot until "pid on" / "drv on". */
+#define QB55_DRV_SDZ_PORT      GPIOA
+#define QB55_DRV_SDZ_PIN       GPIO_PIN_3
+#define QB55_DRV_HIZ_PORT      GPIOA
+#define QB55_DRV_HIZ_PIN       GPIO_PIN_2
+#define QB55_DRV_FAULTZ_PORT   GPIOC
+#define QB55_DRV_FAULTZ_PIN    GPIO_PIN_6
+#define QB55_DRV_ON_DELAY_MS   12U       /* wait after SDZ goes high; the datasheet turn-on time is 10 ms */
+#define QB55_DRV_FAULT_TICKS   2U        /* consecutive control ticks with FAULTZ low before we act */
+
+/* Early (from main): put SDZ / Hi-Z in the disabled state and set up FAULTZ as an input. */
+void QB55_Drv_Init(void);
+
 /* Called once the BLE stack is up. Control stays OFF and IN+ at 0 V until "pid on". */
 void QB55_Thermo_Init(void);
 

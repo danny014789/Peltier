@@ -43,6 +43,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "qb55_in_out.h"
+#include "qb55_thermo.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -137,6 +138,7 @@ int main(void)
   MX_RF_Init();
   /* USER CODE BEGIN 2 */
   QB55_In_Init();   /* IN+ / IN- pins low (0 V) from here on, before the BLE stack starts */
+  QB55_Drv_Init();  /* DRV595 SDZ / Hi-Z in the disabled state, FAULTZ as an input */
   /* USER CODE END 2 */
 
   /* Init code for STM32_WPAN */
